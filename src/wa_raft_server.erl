@@ -283,6 +283,9 @@
 %%------------------------------------------------------------------------------
 
 -type election_type() :: normal | force | allowed.
+-type async_append_cancel_reason() ::
+    wa_raft_acceptor:common_error()
+    | {error, {commit_call_failed_after_submit, term()}}.
 
 %%------------------------------------------------------------------------------
 %% RAFT Server - Private Types
@@ -3657,7 +3660,7 @@ close_async_append_owner_writers(View) ->
     end.
 
 -spec cancel_async_append_pending(
-    Reason :: wa_raft_acceptor:common_error(),
+    Reason :: async_append_cancel_reason(),
     Priority :: wa_raft_acceptor:priority(),
     Pending :: [{gen_server:from(), wa_raft_acceptor:op()}],
     Data :: #raft_state{}
