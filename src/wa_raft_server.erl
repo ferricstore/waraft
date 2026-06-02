@@ -3650,11 +3650,10 @@ rollback_async_append_disk(StateName, #raft_state{table = Table, log_view = View
 
 -spec close_async_append_owner_writers(View :: wa_raft_log:view()) -> ok | {error, term()}.
 close_async_append_owner_writers(View) ->
-    case wa_raft_log:provider(View) of
-        ferricstore_waraft_spike_segment_log ->
-            ferricstore_waraft_spike_segment_log:close_process_writers(wa_raft_log:log(View));
-        _OtherProvider ->
-            ok
+    Provider = wa_raft_log:provider(View),
+    case erlang:function_exported(Provider, close_process_writers, 1) of
+        true -> Provider:close_process_writers(wa_raft_log:log(View));
+        false -> ok
     end.
 
 -spec cancel_async_append_pending(
@@ -4738,22 +4737,41 @@ profile_startup_phase(Application, Partition, Phase, Fun) ->
     Phase :: atom(),
     DurationUs :: non_neg_integer()
 ) -> ok.
-emit_startup_phase(ferricstore_waraft_backend, Partition, Phase, DurationUs) ->
-    case persistent_term:get(telemetry, undefined) of
-        undefined ->
-            ok;
-        _ ->
-            try telemetry:execute(
-                    [ferricstore, waraft, vendor, startup_phase],
-                    #{duration_us => DurationUs},
-                    #{partition => Partition, shard_index => Partition - 1, phase => Phase, module => ?MODULE}
-                ) of
-                _ -> ok
-            catch
-                _:_ -> ok
-            end
+emit_startup_phase(Application, Partition, Phase, DurationUs) ->
+    Callback = application:get_env(Application, waraft_startup_phase_callback, undefined),
+    emit_startup_phase_callback(Callback, Application, Partition, Phase, DurationUs).
+
+-spec emit_startup_phase_callback(
+    Callback :: undefined | fun() | {module(), atom()},
+    Application :: atom(),
+    Partition :: wa_raft:partition(),
+    Phase :: atom(),
+    DurationUs :: non_neg_integer()
+) -> ok.
+emit_startup_phase_callback(undefined, _Application, _Partition, _Phase, _DurationUs) ->
+    ok;
+emit_startup_phase_callback(Callback, Application, Partition, Phase, DurationUs)
+    when is_function(Callback, 4) ->
+    try Callback(Partition, Phase, DurationUs, Application) of
+        _ -> ok
+    catch
+        _:_ -> ok
     end;
-emit_startup_phase(_Application, _Partition, _Phase, _DurationUs) ->
+emit_startup_phase_callback(Callback, Application, Partition, Phase, DurationUs)
+    when is_function(Callback, 5) ->
+    try Callback(Application, Partition, Phase, DurationUs, ?MODULE) of
+        _ -> ok
+    catch
+        _:_ -> ok
+    end;
+emit_startup_phase_callback({Module, Function}, Application, Partition, Phase, DurationUs)
+    when is_atom(Module), is_atom(Function) ->
+    try erlang:apply(Module, Function, [Application, Partition, Phase, DurationUs, ?MODULE]) of
+        _ -> ok
+    catch
+        _:_ -> ok
+    end;
+emit_startup_phase_callback(_Callback, _Application, _Partition, _Phase, _DurationUs) ->
     ok.
 
 -spec identity_to_server(Identity :: #raft_identity{} | undefined) -> {Name :: atom(), Node :: node()} | undefined.

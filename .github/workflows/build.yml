@@ -1,46 +1,59 @@
-name: Build
+name: CI
+
 on:
   push:
     branches:
-      - '*'
+      - main
   pull_request:
-    types:
-      - opened
-      - synchronize
+
+permissions:
+  contents: read
+
 jobs:
-  linux:
-    strategy:
-      matrix:
-        platform: [ubuntu-latest]
-        otp-version: [24]
-    runs-on: ${{ matrix.platform }}
+  build:
+    name: OTP ${{ matrix.otp }}
+    runs-on: ubuntu-latest
     container:
-      image: erlang:${{ matrix.otp-version }}
+      image: erlang:${{ matrix.otp }}
+    strategy:
+      fail-fast: false
+      matrix:
+        otp:
+          - "26"
+          - "27"
+
     steps:
-    - name: Checkout
-      uses: actions/checkout@v2
-    - name: Cache Hex packages
-      uses: actions/cache@v1
-      with:
-        path: ~/.cache/rebar3/hex/hexpm/packages
-        key: ${{ runner.os }}-hex-${{ hashFiles(format('{0}{1}', github.workspace, '/rebar.lock')) }}
-        restore-keys: |
-          ${{ runner.os }}-hex-
-    - name: Cache Dialyzer PLTs
-      uses: actions/cache@v1
-      with:
-        path: ~/.cache/rebar3/rebar3_*_plt
-        key: ${{ runner.os }}-dialyzer-${{ hashFiles(format('{0}{1}', github.workspace, '/rebar.config')) }}
-        restore-keys: |
-          ${{ runner.os }}-dialyzer-
-    - name: Compile
-      run: rebar3 compile
-    - name: Generate Dialyzer PLT
-      run: dialyzer --build_plt --apps erts kernel stdlib
-    - name: Run CT Tests
-      run: rebar3 ct
-    - name: Run Checks
-      run: rebar3 do dialyzer, xref
-    - name: Produce Documentation
-      run: rebar3 edoc
-      if: ${{ matrix.otp-version == '24' }}
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache rebar3
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: ${{ runner.os }}-otp-${{ matrix.otp }}-rebar3-${{ hashFiles('rebar.lock', 'rebar.config') }}
+          restore-keys: |
+            ${{ runner.os }}-otp-${{ matrix.otp }}-rebar3-
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Xref
+        run: rebar3 xref
+
+      - name: Common Test if present
+        shell: bash
+        run: |
+          if find test -name '*_SUITE.erl' -print -quit | grep -q .; then
+            rebar3 ct
+          else
+            echo "No Common Test suites found; skipping rebar3 ct."
+          fi
+
+      - name: Dialyzer
+        run: rebar3 dialyzer
+
+      - name: Generate docs
+        if: matrix.otp == '27'
+        run: rebar3 edoc

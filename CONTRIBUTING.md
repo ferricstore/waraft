@@ -1,34 +1,54 @@
-# Contributing to WhatsApp Raft
-We want to make contributing to this project as easy and transparent as
-possible.
+# Contributing to WARaft
 
-## Our Development Process
-We expect to ship changes to existing setup scripts and add new setup scripts on an ongoing basis.
+Contributions are welcome when they keep the repository stable, dependency-safe,
+and compatible with the existing `wa_raft` OTP application/API.
 
-## Pull Requests
-We actively welcome your pull requests.
+## Ground rules
 
-1. Fork the repo and create your branch from `main`.
-2. Make sure your changes lint and work with all past and present versions of WhatsApp RAFT.
-3. If you haven't already, complete the Contributor License Agreement ("CLA").
+- Keep the OTP application name as `wa_raft`.
+- Keep the module prefix `wa_raft_*` unless there is a deliberate major-version plan.
+- Preserve Apache-2.0 license and copyright notices.
+- Avoid adding runtime dependencies unless there is a strong reason.
+- Prefer small, focused pull requests.
+- Include tests or a clear manual verification note for behavior changes.
 
-## Contributor License Agreement ("CLA")
-In order to accept your pull request, we need you to submit a CLA. You only need
-to do this once to work on any of Meta's open source projects.
+## Local checks
 
-Complete your CLA here: <https://code.facebook.com/cla>
+Run at least:
 
-## Issues
-We use GitHub issues to track public bugs. Please ensure your description is
-clear and has sufficient instructions to be able to reproduce the issue.
+```bash
+rebar3 compile
+rebar3 xref
+```
 
-For issues on your integration with WhatsApp Raft, please use our
-support channel at <https://business.facebook.com/direct-support>.
+For deeper checks:
 
-Meta has a [bounty program](https://www.facebook.com/whitehat/) for the safe
-disclosure of security bugs. In those cases, please go through the process
-outlined on that page and do not file a public issue.
+```bash
+rebar3 dialyzer
+rebar3 edoc
+```
+
+If common-test suites are added later, run:
+
+```bash
+rebar3 ct
+```
+
+## Pull requests
+
+A useful pull request includes:
+
+- What changed.
+- Why it changed.
+- Compatibility impact.
+- How it was tested.
+- Whether the change affects FerricStore integration.
 
 ## License
-By contributing to WhatsApp Raft, you agree that your contributions will be licensed
-under the LICENSE file in the root directory of this source tree.
+
+By contributing, you agree that your contribution is licensed under Apache-2.0,
+the same license as this repository.
+
+## Security issues
+
+Do not open public issues for vulnerabilities. See [SECURITY.md](./SECURITY.md).
