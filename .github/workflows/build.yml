@@ -20,6 +20,7 @@ jobs:
       matrix:
         otp:
           - "27"
+          - "28"
 
     steps:
       - name: Checkout
