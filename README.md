@@ -10,7 +10,7 @@ FerricStore uses WARaft as its durable consensus engine dependency.
 
 ## Status
 
-- Package name: `wa_raft`
+- Package name: `ferricstore_waraft`
 - OTP application: `wa_raft`
 - Current release: `v0.1.0`
 - License: Apache-2.0
@@ -54,14 +54,14 @@ After the Hex package is published:
 
 ```erlang
 {deps, [
-    {wa_raft, "0.1.0"}
+    {wa_raft, "0.1.0", {pkg, ferricstore_waraft}}
 ]}.
 ```
 
 For Elixir/Mix projects:
 
 ```elixir
-{:wa_raft, "~> 0.1", manager: :rebar3}
+{:wa_raft, "~> 0.1", hex: :ferricstore_waraft, manager: :rebar3}
 ```
 
 ## Quick start

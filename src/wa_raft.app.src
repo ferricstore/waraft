@@ -8,6 +8,9 @@
 {application, wa_raft, [
     {description, "Erlang implementation of RAFT Consensus Protocol"},
     {vsn, "0.1.0"},
+    {licenses, ["Apache-2.0"]},
+    {pkg_name, ferricstore_waraft},
+    {links, [{"GitHub", "https://github.com/ferricstore/waraft"}]},
     {modules, []},
     %% NOTE: No more dependency is expected for this app
     {applications, [
