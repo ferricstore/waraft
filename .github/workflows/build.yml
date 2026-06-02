@@ -45,7 +45,7 @@ jobs:
       - name: Common Test if present
         shell: bash
         run: |
-          if find test -name '*_SUITE.erl' -print -quit | grep -q .; then
+          if [ -d test ] && find test -name '*_SUITE.erl' -print -quit | grep -q .; then
             rebar3 ct
           else
             echo "No Common Test suites found; skipping rebar3 ct."

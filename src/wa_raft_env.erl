@@ -83,15 +83,13 @@ get_env_impl([App | SearchApps], Key, FallbackKey) ->
         undefined   -> get_env_impl(SearchApps, Key, FallbackKey)
     end.
 
--doc """
-Get a configuration value with table-level overrides.
-
-Table-level configuration is supported by storing the value as a tagged tuple:
-  `{table_overrides, #{Table => Value}, AppDefault}`
-When this format is found, the table is looked up in the map first.
-If the table is not in the map, AppDefault is used. If the value is a plain
-(untagged) term, it is used directly as the app-level value for all tables.
-""".
+%% Get a configuration value with table-level overrides.
+%%
+%% Table-level configuration is supported by storing the value as a tagged tuple:
+%%   {table_overrides, #{Table => Value}, AppDefault}
+%% When this format is found, the table is looked up in the map first.
+%% If the table is not in the map, AppDefault is used. If the value is a plain
+%% untagged term, it is used directly as the app-level value for all tables.
 -spec get_table_env(Scope :: scope(), Table :: wa_raft:table(), Key :: key()) -> {ok, Value :: dynamic()} | undefined.
 get_table_env(Scope, Table, Key) ->
     get_table_env_impl(search_apps(Scope), Table, key(Key), fallback(Key)).

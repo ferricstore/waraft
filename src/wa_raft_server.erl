@@ -2877,7 +2877,7 @@ maybe_update_config(_, _, _, State) ->
     Config :: config()
 ) -> Existing :: [Value].
 to_member_list(Mapping, Config) ->
-    [Value || {_, Node} <:- config_membership(Config), {ok, Value} <- [maps:find(Node, Mapping)]].
+    [Value || {_, Node} <- config_membership(Config), {ok, Value} <- [maps:find(Node, Mapping)]].
 
 %% Convert a mapping of peers to values to a list of values for all members of the
 %% cluster, using the provided default value for any members that are not
@@ -2888,7 +2888,7 @@ to_member_list(Mapping, Config) ->
     Config :: config()
 ) -> Normalized :: [Value].
 to_member_list(Mapping, Default, Config) ->
-    [maps:get(Node, Mapping, Default) || {_, Node} <:- config_membership(Config)].
+    [maps:get(Node, Mapping, Default) || {_, Node} <- config_membership(Config)].
 
 %%------------------------------------------------------------------------------
 %% RAFT Server - State Machine Implementation - Quorum and Majority
