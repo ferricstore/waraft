@@ -42,6 +42,9 @@ jobs:
       - name: Xref
         run: rebar3 xref
 
+      - name: EUnit
+        run: rebar3 eunit
+
       - name: Common Test if present
         shell: bash
         run: |

@@ -540,5 +540,9 @@
     handover :: undefined | {node(), reference(), integer()},
 
     %% [Disabled] The reason for which this RAFT replica was disabled
-    disable_reason :: term()
+    disable_reason :: term(),
+
+    %% [Leader] Absolute deadline for the current pending commit batch.
+    %% Heartbeat replies must not replace it with a later periodic timeout.
+    commit_batch_deadline = undefined :: undefined | integer()
 }).

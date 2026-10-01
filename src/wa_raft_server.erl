@@ -154,8 +154,10 @@
 -export([
     config/1,
     compute_member_quorum/2,
-    leader_adjust_config/2
+    leader_adjust_config/2,
+    leader_timeout_for_test/1
 ]).
+
 -endif.
 
 %%------------------------------------------------------------------------------
@@ -191,9 +193,9 @@
 -define(ELECTION_TIMEOUT(State), {state_timeout, random_election_timeout(State), election}).
 
 %% Timeout in milliseconds before the next heartbeat is to be sent by a RAFT leader with no pending log entries
--define(HEARTBEAT_TIMEOUT(State),    {state_timeout, ?RAFT_HEARTBEAT_INTERVAL(State#raft_state.application, State#raft_state.table), heartbeat}).
+-define(HEARTBEAT_TIMEOUT(State),    leader_timeout(State)).
 %% Timeout in milliseconds before the next heartbeat is to be sent by a RAFT leader with pending log entries
--define(COMMIT_BATCH_TIMEOUT(State), {state_timeout, ?RAFT_COMMIT_BATCH_INTERVAL(State#raft_state.application, State#raft_state.table), batch_commit}).
+-define(COMMIT_BATCH_TIMEOUT(State), leader_timeout(State)).
 
 %%------------------------------------------------------------------------------
 
@@ -1446,7 +1448,12 @@ leader(
     % than the limit on the number of pending commits.
     ?RAFT_COUNT(Table, {'commit', Priority}),
     HadPending = has_pending_commits(State0),
-    State1 = add_pending(From, Op, Priority, State0),
+    BufferedState = add_pending(From, Op, Priority, State0),
+    State1 = case HadPending of
+        false -> BufferedState#raft_state{commit_batch_deadline =
+            erlang:monotonic_time(millisecond) + ?RAFT_COMMIT_BATCH_INTERVAL(App, Table)};
+        true -> BufferedState
+    end,
     % Single-member leaders can apply their own log immediately, but doing it
     % before this batching gate defeats raft_commit_batch_interval_ms and turns
     % every standalone durable write into its own fsync. Keep the command
@@ -4455,6 +4462,24 @@ cast(
     end.
 
 -spec maybe_heartbeat(#raft_state{}) -> #raft_state{}.
+-spec leader_timeout(#raft_state{}) -> gen_statem:action().
+-ifdef(TEST).
+-spec leader_timeout_for_test(#raft_state{}) -> gen_statem:action().
+leader_timeout_for_test(Data) -> leader_timeout(Data).
+-endif.
+
+leader_timeout(#raft_state{application = App, table = Table, handover = Handover,
+    append_in_flight = InFlight, commit_batch_deadline = Deadline} = Data) ->
+    HeartbeatMs = ?RAFT_HEARTBEAT_INTERVAL(App, Table),
+    case Handover =:= undefined andalso InFlight =:= undefined andalso
+        is_integer(Deadline) andalso has_pending_commits(Data) of
+        true ->
+            Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
+            {state_timeout, min(Remaining, HeartbeatMs), batch_commit};
+        false ->
+            {state_timeout, HeartbeatMs, heartbeat}
+    end.
+
 maybe_heartbeat(#raft_state{table = Table} = State) ->
     case should_heartbeat(State) of
         true ->
