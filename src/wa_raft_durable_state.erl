@@ -17,6 +17,22 @@
     sync/1
 ]).
 
+-ifdef(TEST).
+-export([
+    dir_sync_result/1,
+    start_file_op_trace/0,
+    stop_file_op_trace/0
+]).
+-endif.
+
+%% Test seam: in TEST builds, record the durability-relevant file operations
+%% completed by store/1 so that tests can check their order. A no-op otherwise.
+-ifdef(TEST).
+-define(TRACE_FILE_OP(Op), trace_file_op(Op)).
+-else.
+-define(TRACE_FILE_OP(Op), ok).
+-endif.
+
 -spec load(StateIn :: #raft_state{}) -> {ok, StateOut :: #raft_state{}} | no_state | {error, Reason :: term()}.
 load(#raft_state{name = Name, partition_path = PartitionPath} = State) ->
     StateItems = [
@@ -79,17 +95,32 @@ store(#raft_state{name = Name, table = Table, partition_path = PartitionPath, cu
     StateFileTemp = [StateFile, ".temp"],
     case filelib:ensure_dir(StateFile) of
         ok ->
-            case prim_file:write_file(StateFileTemp, StateIO) of
+            % The new state must be on stable storage before it replaces the
+            % old state file, and the rename itself must be on stable storage
+            % before the caller acts on the new state (e.g. grants a vote).
+            case write_and_sync_file(StateFileTemp, StateIO) of
                 ok ->
                     case file:rename(StateFileTemp, StateFile) of
                         ok ->
-                            ok;
+                            ?TRACE_FILE_OP({rename, StateFileTemp, StateFile}),
+                            case dir_sync_result(sync_dir(filename:dirname(StateFile))) of
+                                ok ->
+                                    ok;
+                                {error, Reason} ->
+                                    ?RAFT_COUNT(Table, {'server.persist_state.error.sync_dir', Reason}),
+                                    ?RAFT_LOG_ERROR("~p failed to sync state file directory due to ~p.", [Name, Reason]),
+                                    {error, {sync_dir, Reason}}
+                            end;
                         {error, Reason} ->
                             ?RAFT_COUNT(Table, {'server.persist_state.error.rename', Reason}),
                             ?RAFT_LOG_ERROR("~p failed to rename temporary state file due to ~p.", [Name, Reason]),
                             {error, {rename, Reason}}
                     end;
-                {error, Reason} ->
+                {error, {sync, Reason}} ->
+                    ?RAFT_COUNT(Table, {'server.persist_state.error.sync', Reason}),
+                    ?RAFT_LOG_ERROR("~p failed to sync temporary state file due to ~p.", [Name, Reason]),
+                    {error, {sync, Reason}};
+                {error, {write, Reason}} ->
                     ?RAFT_COUNT(Table, {'server.persist_state.error.write', Reason}),
                     ?RAFT_LOG_ERROR("~p failed to write current state to temporary file due to ~p.", [Name, Reason]),
                     {error, {write, Reason}}
@@ -111,3 +142,96 @@ sync(#raft_state{partition_path = PartitionPath}) ->
         _ ->
             ok
     end.
+
+%% Write the provided data to the file at the provided path and flush it to
+%% stable storage.
+-spec write_and_sync_file(Path :: file:name_all(), Data :: iodata()) -> ok | {error, {write | sync, Reason :: term()}}.
+write_and_sync_file(Path, Data) ->
+    case file:open(Path, [write, raw, binary]) of
+        {ok, Fd} ->
+            Result = case file:write(Fd, Data) of
+                ok ->
+                    case file:sync(Fd) of
+                        ok ->
+                            ?TRACE_FILE_OP({sync_file, Path}),
+                            ok;
+                        {error, Reason} ->
+                            {error, {sync, Reason}}
+                    end;
+                {error, Reason} ->
+                    {error, {write, Reason}}
+            end,
+            case file:close(Fd) of
+                {error, CloseReason} when Result =:= ok -> {error, {write, CloseReason}};
+                _ -> Result
+            end;
+        {error, Reason} ->
+            {error, {write, Reason}}
+    end.
+
+%% Flush the entries of the provided directory (e.g. a file just renamed into
+%% it) to stable storage.
+-spec sync_dir(Dir :: file:name_all()) -> ok | {error, Reason :: term()}.
+sync_dir(Dir) ->
+    case file:open(Dir, [read, raw, directory]) of
+        {ok, Fd} ->
+            SyncResult = file:sync(Fd),
+            CloseResult = file:close(Fd),
+            case SyncResult of
+                ok ->
+                    ?TRACE_FILE_OP({sync_dir, Dir}),
+                    CloseResult;
+                {error, _} ->
+                    SyncResult
+            end;
+        {error, _} = OpenError ->
+            OpenError
+    end.
+
+%% Some platforms and filesystems cannot fsync a directory at all and report
+%% this as `einval' (e.g. Linux on filesystems without directory fsync support)
+%% or as "operation not supported" (ENOTSUP, which surfaces as `enotsup' or
+%% `eopnotsupp' depending on the platform's errno definitions). Nothing more
+%% can be done to make the rename durable there, so these are not failures.
+%% Any other error (e.g. `eio') means the rename may not survive a crash and
+%% is returned.
+-spec dir_sync_result(Result :: ok | {error, Reason :: term()}) -> ok | {error, Reason :: term()}.
+dir_sync_result({error, Reason}) when Reason =:= einval; Reason =:= enotsup; Reason =:= eopnotsupp ->
+    ok;
+dir_sync_result(Result) ->
+    Result.
+
+%%------------------------------------------------------------------------------
+%% Test seam
+%%------------------------------------------------------------------------------
+
+-ifdef(TEST).
+-define(FILE_OP_TRACE_KEY, {?MODULE, file_op_trace}).
+
+-type file_op() ::
+    {sync_file, Path :: file:name_all()} |
+    {rename, Source :: file:name_all(), Destination :: file:name_all()} |
+    {sync_dir, Dir :: file:name_all()}.
+
+%% Start recording the file operations completed by store/1 in this process.
+-spec start_file_op_trace() -> ok.
+start_file_op_trace() ->
+    put(?FILE_OP_TRACE_KEY, []),
+    ok.
+
+%% Stop recording and return the recorded file operations in the order in
+%% which they completed.
+-spec stop_file_op_trace() -> [file_op()].
+stop_file_op_trace() ->
+    case erase(?FILE_OP_TRACE_KEY) of
+        undefined -> [];
+        Ops -> lists:reverse(Ops)
+    end.
+
+-spec trace_file_op(Op :: file_op()) -> ok.
+trace_file_op(Op) ->
+    case get(?FILE_OP_TRACE_KEY) of
+        undefined -> ok;
+        Ops -> put(?FILE_OP_TRACE_KEY, [Op | Ops]), ok
+    end.
+-endif.

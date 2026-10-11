@@ -11,6 +11,7 @@
 - Add deadline regressions and run EUnit checks in CI.
 - Added adaptive commit batching: the first idle leader commit flushes immediately, while existing pending batches keep using the configured batch window and max-count policy.
 - Added focused tests for fixed-window and adaptive commit batch decisions.
+- Fixed durability of the persisted term/vote state: the state file is now fsynced before being renamed into place and its directory is fsynced after the rename, a replica no longer grants a vote (or acknowledges an enable request) when persisting that state fails, and a disabled replica retries persisting its disable reason until it is durable instead of coming back enabled after a restart.
 
 ## 0.1.0 - 2026-06-02
 

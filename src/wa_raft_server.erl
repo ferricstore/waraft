@@ -166,6 +166,13 @@
 
 -endif.
 
+-ifdef(TEST).
+-export([
+    vote_grant_decision/5,
+    persist_disable_reason/1
+]).
+-endif.
+
 %%------------------------------------------------------------------------------
 %% RAFT Server - Public Types
 %%------------------------------------------------------------------------------
@@ -202,6 +209,8 @@
 -define(HEARTBEAT_TIMEOUT(State),    leader_timeout(State)).
 %% Timeout in milliseconds before the next heartbeat is to be sent by a RAFT leader with pending log entries
 -define(COMMIT_BATCH_TIMEOUT(State), leader_timeout(State)).
+%% Timeout in milliseconds before a disabled replica retries persisting its disable reason
+-define(PERSIST_DISABLE_REASON_RETRY_MS, 1000).
 
 %%------------------------------------------------------------------------------
 
@@ -2170,9 +2179,12 @@ disabled(enter, LastState, #raft_state{table = Table, disable_reason = DisableRe
                 _         -> State0
             end,
             State2 = enter_state(?FUNCTION_NAME, State1),
-            wa_raft_durable_state:store(State2),
-            {keep_state, State2}
+            persist_disable_reason(State2)
     end;
+
+%% [Persist] Retry persisting the disable reason until it is durable
+disabled(state_timeout, persist_disable_reason, #raft_state{} = State) ->
+    persist_disable_reason(State);
 
 %% [Internal] Advance to newer term when requested
 disabled(
@@ -2225,8 +2237,15 @@ disabled({call, From}, ?PROMOTE_COMMAND(_, _), #raft_state{}) ->
 disabled({call, From}, ?ENABLE_COMMAND, #raft_state{} = State0) ->
     ?SERVER_LOG_NOTICE(State0, "re-enabling by request from ~0p by moving to stalled state.", [From]),
     State1 = State0#raft_state{disable_reason = undefined},
-    wa_raft_durable_state:store(State1),
-    {next_state, stalled, State1, {reply, From, ok}};
+    % Only re-enable once the cleared disable reason is durable so that the
+    % replica does not report itself as enabled but come back disabled.
+    case wa_raft_durable_state:store(State1) of
+        ok ->
+            {next_state, stalled, State1, {reply, From, ok}};
+        {error, Reason} ->
+            ?SERVER_LOG_WARNING(State0, "remains disabled because persisting the cleared disable reason failed due to ~0p.", [Reason]),
+            {keep_state_and_data, {reply, From, {error, persist_failed}}}
+    end;
 
 %% [Command] Defer to common handling for generic RAFT server commands
 disabled(Type, ?RAFT_COMMAND(_, _) = Event, #raft_state{} = State) ->
@@ -4410,9 +4429,7 @@ handle_request_vote(
                     % If this vote request causes the current replica to allocate its vote, then
                     % persist the vote before responding. (Fig. 2)
                     NewData = Data#raft_state{voted_for = CandidateId},
-                    wa_raft_durable_state:store(NewData),
-                    send_rpc(Candidate, ?VOTE(true), NewData),
-                    {keep_state, NewData};
+                    vote_grant_decision(State, Candidate, wa_raft_durable_state:store(NewData), Data, NewData);
                 CandidateId ->
                     % Otherwise, the vote allocation did not change, so just send the response.
                     send_rpc(Candidate, ?VOTE(true), Data),
@@ -4438,6 +4455,38 @@ handle_request_vote(State, Candidate, _, _,  #raft_state{voted_for = VotedFor} =
         [Candidate, VotedFor]
     ),
     send_rpc(Candidate, ?VOTE(false), Data),
+    keep_state_and_data.
+
+%% Persist the disable reason of a replica that just became disabled. If that
+%% fails, the replica stays disabled in memory and retries, because a restart
+%% would otherwise load the previous durable state and come back enabled.
+-spec persist_disable_reason(Data :: #raft_state{}) -> gen_statem:event_handler_result(state(), #raft_state{}).
+persist_disable_reason(#raft_state{table = Table} = Data) ->
+    case wa_raft_durable_state:store(Data) of
+        ok ->
+            {keep_state, Data};
+        {error, Reason} ->
+            ?RAFT_COUNT(Table, 'disabled.persist_reason.error'),
+            ?SERVER_LOG_WARNING(disabled, Data, "failed to persist disable reason due to ~0p; retrying.", [Reason]),
+            {keep_state, Data, [{state_timeout, ?PERSIST_DISABLE_REASON_RETRY_MS, persist_disable_reason}]}
+    end.
+
+%% Decide whether to grant a newly allocated vote (recorded in `NewData') given
+%% the result of persisting it. A vote may only be granted once it is durable
+%% (Fig. 2); otherwise a crash could let this replica vote twice in one term.
+%% If persisting fails, neither respond nor keep the allocation in memory.
+-spec vote_grant_decision(
+    State :: state(),
+    Candidate :: #raft_identity{},
+    StoreResult :: ok | {error, Reason :: term()},
+    Data :: #raft_state{},
+    NewData :: #raft_state{}
+) -> gen_statem:event_handler_result(state(), #raft_state{}).
+vote_grant_decision(_State, Candidate, ok, _Data, NewData) ->
+    send_rpc(Candidate, ?VOTE(true), NewData),
+    {keep_state, NewData};
+vote_grant_decision(State, Candidate, {error, Reason}, Data, _NewData) ->
+    ?SERVER_LOG_WARNING(State, Data, "withholds vote for candidate ~0p because persisting the vote failed due to ~0p.", [Candidate, Reason]),
     keep_state_and_data.
 
 %%------------------------------------------------------------------------------
