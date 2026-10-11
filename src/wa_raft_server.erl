@@ -72,6 +72,12 @@
     get_current_config/1
 ]).
 
+-ifdef(TEST).
+-export([
+    commit_batch_decision_for_test/6
+]).
+-endif.
+
 -export([
     status/1,
     status/2,
@@ -1454,16 +1460,16 @@ leader(
             erlang:monotonic_time(millisecond) + ?RAFT_COMMIT_BATCH_INTERVAL(App, Table)};
         true -> BufferedState
     end,
-    % Single-member leaders can apply their own log immediately, but doing it
-    % before this batching gate defeats raft_commit_batch_interval_ms and turns
-    % every standalone durable write into its own fsync. Keep the command
-    % pending until the same batch window/max-count policy used by multi-member
-    % leaders decides to flush. Arm the window only for the first pending
-    % commit. Re-arming it on every commit lets continuous sub-max traffic
-    % postpone the append until the stream goes idle.
+    % Single-member leaders can apply their own log immediately, but blindly
+    % doing it for every request defeats raft_commit_batch_interval_ms and turns
+    % durable write bursts into one fsync per command. Adaptive batching keeps
+    % low-rate writes low-latency while preserving fixed-window coalescing when
+    % the leader mailbox already has backlog. The window is armed only for the
+    % first pending commit: re-arming it on every commit lets continuous sub-max
+    % traffic postpone the append until the stream goes idle.
     PendingCount = pending_count(State1),
-    case ?RAFT_COMMIT_BATCH_INTERVAL(App, Table) > 0 andalso PendingCount =< ?RAFT_COMMIT_BATCH_MAX_ENTRIES(App, Table) of
-        true ->
+    case commit_batch_decision(App, Table, HadPending, PendingCount) of
+        delay ->
             ?RAFT_COUNT(Table, 'commit.batch.delay'),
             case HadPending of
                 true ->
@@ -1471,7 +1477,7 @@ leader(
                 false ->
                     {keep_state, State1, ?COMMIT_BATCH_TIMEOUT(State1)}
             end;
-        false ->
+        flush ->
             State2 = append_entries_to_followers(State1),
             State3 = apply_single_node_cluster(State2),
             {keep_state, State3, ?HEARTBEAT_TIMEOUT(State3)}
@@ -3354,6 +3360,36 @@ has_pending_commits(#raft_state{}) ->
 -spec pending_count(Data :: #raft_state{}) -> non_neg_integer().
 pending_count(#raft_state{pending_high = PendingHigh, pending_low = PendingLow}) ->
     length(PendingHigh) + length(PendingLow).
+
+-spec commit_batch_decision(
+    App :: atom(),
+    Table :: wa_raft:table(),
+    HadPending :: boolean(),
+    PendingCount :: non_neg_integer()
+) -> delay | flush.
+commit_batch_decision(App, Table, HadPending, PendingCount) ->
+    IntervalMs = ?RAFT_COMMIT_BATCH_INTERVAL(App, Table),
+    MaxEntries = ?RAFT_COMMIT_BATCH_MAX_ENTRIES(App, Table),
+    Adaptive = ?RAFT_COMMIT_BATCH_ADAPTIVE(App, Table),
+    commit_batch_decision_for_test(IntervalMs, MaxEntries, Adaptive, HadPending, PendingCount, false).
+
+-spec commit_batch_decision_for_test(
+    IntervalMs :: non_neg_integer(),
+    MaxEntries :: pos_integer(),
+    Adaptive :: boolean(),
+    HadPending :: boolean(),
+    PendingCount :: non_neg_integer(),
+    MailboxBacklog :: boolean()
+) -> delay | flush.
+commit_batch_decision_for_test(0, _MaxEntries, _Adaptive, _HadPending, _PendingCount, _MailboxBacklog) ->
+    flush;
+commit_batch_decision_for_test(_IntervalMs, MaxEntries, _Adaptive, _HadPending, PendingCount, _MailboxBacklog)
+    when PendingCount > MaxEntries ->
+    flush;
+commit_batch_decision_for_test(_IntervalMs, _MaxEntries, true, false, 1, _MailboxBacklog) ->
+    flush;
+commit_batch_decision_for_test(_IntervalMs, _MaxEntries, _Adaptive, _HadPending, _PendingCount, _MailboxBacklog) ->
+    delay.
 
 -spec add_pending(
     From :: gen_server:from(),

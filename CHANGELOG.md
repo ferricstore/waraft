@@ -9,6 +9,8 @@
   expired batching deadline. Quorum, persistence, and application semantics are
   unchanged.
 - Add deadline regressions and run EUnit checks in CI.
+- Added adaptive commit batching: the first idle leader commit flushes immediately, while existing pending batches keep using the configured batch window and max-count policy.
+- Added focused tests for fixed-window and adaptive commit batch decisions.
 
 ## 0.1.0 - 2026-06-02
 

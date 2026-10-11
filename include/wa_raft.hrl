@@ -196,6 +196,11 @@
 %% triggering a heartbeat due to having pending log entries
 -define(RAFT_COMMIT_BATCH_INTERVAL, raft_commit_batch_interval_ms).
 -define(RAFT_COMMIT_BATCH_INTERVAL(App, Table), ?RAFT_TABLE_CONFIG(App, Table, ?RAFT_COMMIT_BATCH_INTERVAL, 2)).
+%% When enabled, the first commit in an idle leader flushes immediately.
+%% Existing pending batches still use the configured commit batch window and
+%% max-count policy.
+-define(RAFT_COMMIT_BATCH_ADAPTIVE, raft_commit_batch_adaptive).
+-define(RAFT_COMMIT_BATCH_ADAPTIVE(App, Table), (?RAFT_TABLE_CONFIG(App, Table, ?RAFT_COMMIT_BATCH_ADAPTIVE, false) =:= true)).
 %% Maximum number of pending log entries to collect before a heartbeat is forced. This should
 %% be at most equal to the maximum number of log entries permitted per heartbeat.
 -define(RAFT_COMMIT_BATCH_MAX_ENTRIES, raft_commit_batch_max).
