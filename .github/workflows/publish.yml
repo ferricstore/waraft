@@ -61,7 +61,9 @@ jobs:
           mkdir -p "$HOME/.config/rebar3"
           echo '{plugins, [{rebar3_hex, "7.1.0"}]}.' > "$HOME/.config/rebar3/rebar.config"
 
+      # rebar3_hex reads HEX_API_KEY only when the repository is named with
+      # --repo; without it, publishing looks for a locally stored write key.
       - name: Publish package
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        run: rebar3 hex publish package --yes
+        run: rebar3 hex publish package --repo hexpm --yes
