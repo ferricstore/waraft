@@ -34,7 +34,7 @@ repository, not in this `wa_raft` package.
 
 ### Git dependency
 
-Until the Hex package is published, use the Git tag:
+To build from source, use the Git tag:
 
 ```erlang
 {deps, [
@@ -50,7 +50,7 @@ For Elixir/Mix projects:
 
 ### Hex dependency
 
-After the Hex package is published:
+The package is published on Hex as `ferricstore_waraft`:
 
 ```erlang
 {deps, [
