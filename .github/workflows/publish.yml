@@ -1,0 +1,67 @@
+name: Publish to Hex
+
+# Publishes the ferricstore_waraft package when a version tag is pushed, or
+# for an existing tag when run by hand. The tag must match the version in
+# src/wa_raft.app.src. Needs the HEX_API_KEY repository secret (a hex.pm key
+# with write access to ferricstore_waraft).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish, for example v0.1.1"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hex-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ferricstore_waraft
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check the tag matches the app version
+        shell: bash
+        run: |
+          vsn=$(erl -noshell -eval '{ok, [{application, _, Props}]} = file:consult("src/wa_raft.app.src"), io:format("~s", [proplists:get_value(vsn, Props)]), halt().')
+          if [ "$TAG" != "v$vsn" ]; then
+            echo "Tag $TAG does not match app version $vsn" >&2
+            exit 1
+          fi
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Xref
+        run: rebar3 xref
+
+      - name: EUnit
+        run: rebar3 eunit
+
+      - name: Install the Hex plugin
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.config/rebar3"
+          echo '{plugins, [{rebar3_hex, "7.1.0"}]}.' > "$HOME/.config/rebar3/rebar.config"
+
+      - name: Publish package
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: rebar3 hex publish package --yes
