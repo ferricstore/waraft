@@ -1909,15 +1909,24 @@ candidate(
             % When pre-vote is enabled, a round of pre-votes must first be issued
             % before the term can be advanced.
             Ref = make_ref(),
+            PreVotes = #{node() => true},
             State2 = State1#raft_state{
                 pre_vote_ref = Ref,
-                pre_votes = #{node() => true}
+                pre_votes = PreVotes
             },
 
-            % Request a pre-vote from all peers.
-            send_rpc_to_all_members(?REQUEST_PRE_VOTE(Ref), State2),
-
-            {keep_state, State2, ?ELECTION_TIMEOUT(State2)};
+            case find_member_majority(PreVotes, config(State2)) of
+                {found, true} ->
+                    % A replica that is a majority on its own, such as the only
+                    % member of its cluster, has no peers whose replies it could
+                    % wait for, so its pre-vote has already passed.
+                    ?RAFT_COUNT(Table, 'candidate.pre_vote.passed'),
+                    candidate_start_election(normal, State2);
+                _ ->
+                    % Request a pre-vote from all peers.
+                    send_rpc_to_all_members(?REQUEST_PRE_VOTE(Ref), State2),
+                    {keep_state, State2, ?ELECTION_TIMEOUT(State2)}
+            end;
         false ->
             % Otherwise, immediately start the election.
             candidate_start_election(ElectionType, State1)
