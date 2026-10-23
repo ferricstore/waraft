@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 - 2026-10-23
+
+- With pre-vote on (`raft_election_pre_vote`), the only member of a cluster
+  that lost leadership, for example when its server restarted, stayed a
+  candidate and never took writes again: it waited for pre-votes from peers it
+  does not have. A candidate whose own pre-vote is a majority now starts the
+  election at once; members of larger clusters still wait for their peers.
+
 ## 0.1.1 - 2026-10-16
 
 - Fixed durability of the persisted term/vote state: the state file is now
