@@ -40,24 +40,42 @@
 ]).
 
 set_owner(Pid) ->
+    case ets:info(?MODULE) of
+        undefined -> ets:new(?MODULE, [named_table, public, set]);
+        _ -> ok
+    end,
     persistent_term:put({?MODULE, owner}, Pid).
 
 %% Makes every truncate return {error, Reason}.
 fail_truncate(Reason) ->
     persistent_term:put({?MODULE, truncate}, Reason).
 
+%% Releases appends still held, failing them, so that a failed test does not
+%% leave the server waiting on the gate.
 clear() ->
     _ = persistent_term:erase({?MODULE, owner}),
     _ = persistent_term:erase({?MODULE, truncate}),
-    ok.
+    case ets:info(?MODULE) of
+        undefined ->
+            ok;
+        _ ->
+            [Appender ! {gate, {error, gate_cleared}} || {Appender} <- ets:tab2list(?MODULE)],
+            true = ets:delete(?MODULE),
+            ok
+    end.
 
 append(View, Entries, Mode, Priority) ->
     case persistent_term:get({?MODULE, owner}, undefined) of
         undefined ->
             wa_raft_log_ets:append(View, Entries, Mode, Priority);
         Owner ->
+            true = ets:insert(?MODULE, {self()}),
             Owner ! {gate_append, self(), Entries},
-            gate_result(View, Entries, Mode, Priority)
+            try
+                gate_result(View, Entries, Mode, Priority)
+            after
+                catch ets:delete(?MODULE, self())
+            end
     end.
 
 gate_result(View, Entries, Mode, Priority) ->

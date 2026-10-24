@@ -12,6 +12,53 @@
 -define(TABLE, wa_raft_async_append_test).
 -define(PARTITION, 1).
 
+%% A configuration entry is appended directly after the log's last entry,
+%% where an async append in flight is writing, so the leader waits for that
+%% append to complete before appending the change.
+config_change_waits_for_the_async_append_in_flight_test_() ->
+    {timeout, 30, fun () ->
+        with_partition(fun (Server, Acceptor) ->
+            Last = log_last(Server),
+            wa_raft_log_gate:set_owner(self()),
+            commit_async(Acceptor, a),
+            Appender = await_gate_append(),
+            Parent = self(),
+            Peer = {Server, 'wa_raft_async_append_peer@nohost'},
+            spawn(fun () -> Parent ! {adjusted, wa_raft_server:adjust_membership(Server, add, Peer)} end),
+            ?assertEqual(none, maybe_gate_append(200)),
+            Appender ! {gate, ok},
+            ConfigAppender = await_gate_append(),
+            ConfigAppender ! {gate, ok},
+            ConfigIndex = Last + 2,
+            ?assertMatch({ok, #raft_log_pos{index = ConfigIndex}},
+                         receive {adjusted, Adjusted} -> Adjusted after 5000 -> timeout end),
+            %% The write committed under the configuration it was written under.
+            ?assertEqual(ok, await_commit(a, 1000)),
+            ?assertMatch({ok, {_, {_, {write, ?TABLE, a, a}}}}, wa_raft_log_ets_get(Last + 1)),
+            ?assertMatch({ok, {_, {_, {config, _}}}}, wa_raft_log_ets_get(ConfigIndex))
+        end)
+    end}.
+
+%% An append still running after the wait leaves the configuration unchanged
+%% and completes as usual afterwards.
+config_change_fails_while_the_async_append_runs_on_test_() ->
+    {timeout, 30, fun () ->
+        with_partition(fun (Server, Acceptor) ->
+            Last = log_last(Server),
+            Config = wa_raft_server:get_current_config(Server),
+            wa_raft_log_gate:set_owner(self()),
+            commit_async(Acceptor, a),
+            Appender = await_gate_append(),
+            Peer = {Server, 'wa_raft_async_append_peer@nohost'},
+            ?assertEqual({error, async_append_in_flight}, wa_raft_server:adjust_membership(Server, add, Peer)),
+            ?assertEqual(none, maybe_gate_append(0)),
+            Appender ! {gate, ok},
+            ?assertEqual(ok, await_commit(a, 1000)),
+            ?assertEqual(Last + 1, log_last(Server)),
+            ?assertEqual(Config, wa_raft_server:get_current_config(Server))
+        end)
+    end}.
+
 %% A server that crashes rolling back a failed append is restarted right away:
 %% shutting down must not wait for the append's worker, which has already
 %% finished.
@@ -79,6 +126,13 @@ commit_async(Acceptor, Name) ->
     spawn(fun () -> Parent ! {committed, Name, commit(Acceptor, Name)} end),
     ok.
 
+await_commit(Name, TimeoutMs) ->
+    receive
+        {committed, Name, Result} -> Result
+    after TimeoutMs ->
+        timeout
+    end.
+
 await_gate_append() ->
     case maybe_gate_append(5000) of
         none -> error(no_append);
@@ -91,6 +145,19 @@ maybe_gate_append(TimeoutMs) ->
     after TimeoutMs ->
         none
     end.
+
+log_last(Server) ->
+    wa_raft_server:status(Server, log_last).
+
+wa_raft_log_ets_get(Index) ->
+    Log = #raft_log{
+        name = wa_raft_log:default_name(?TABLE, ?PARTITION),
+        application = ?APP,
+        table = ?TABLE,
+        partition = ?PARTITION,
+        provider = wa_raft_log_gate
+    },
+    wa_raft_log_ets:get(Log, Index).
 
 await_restart(Server, Before, TimeoutMs) ->
     Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
