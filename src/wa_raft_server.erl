@@ -1541,8 +1541,10 @@ leader({call, From}, ?RESIGN_COMMAND, #raft_state{} = State) ->
     {next_state, follower_or_witness(State), State, {reply, From, ok}};
 
 %% [Adjust Membership] Leader attempts to commit a single-node membership change.
-leader(Type, ?ADJUST_CONFIG_COMMAND(From, Action, Index), #raft_state{queues = Queues} = State0) ->
+leader(Type, ?ADJUST_CONFIG_COMMAND(From, Action, Index), #raft_state{queues = Queues} = Data0) ->
+    {Taken, State0} = await_async_log_append(Data0),
     maybe
+        ok ?= Taken,
         ok ?= leader_config_change_allowed(Index, State0),
         {ok, NewConfig} ?= leader_adjust_config(Action, State0),
         % With all checks completed, we can now attempt to append the new
@@ -1570,7 +1572,14 @@ leader(Type, ?ADJUST_CONFIG_COMMAND(From, Action, Index), #raft_state{queues = Q
             From =/= undefined andalso
                 wa_raft_queue:commit_completed(Queues, From, {error, Reason}, high),
             reply(Type, {error, Reason}),
-            keep_state_and_data
+            case Data0 of
+                #raft_state{append_in_flight = undefined} ->
+                    keep_state_and_data;
+                #raft_state{} ->
+                    % The async append taken above may have completed entries to apply.
+                    StateE = apply_single_node_cluster(State0),
+                    {keep_state, StateE, ?HEARTBEAT_TIMEOUT(StateE)}
+            end
     end;
 
 %% [Handover Candidates] Return list of handover candidates (peers that are not lagging too much)
@@ -3663,6 +3672,34 @@ complete_async_log_append_down(
 complete_async_log_append_down(_StateName, _MonitorRef, _WorkerPid, _Reason, #raft_state{} = Data) ->
     Data.
 
+%% A configuration entry is appended directly after the log's last entry,
+%% where an async append in flight is writing, so that append's result is
+%% taken first. It is a local disk append; one still running after the wait
+%% leaves the configuration unchanged.
+-define(ASYNC_APPEND_TAKE_TIMEOUT_MS, 5000).
+
+-spec await_async_log_append(Data :: #raft_state{}) -> {ok | {error, async_append_in_flight}, #raft_state{}}.
+await_async_log_append(#raft_state{append_in_flight = undefined} = Data) ->
+    {ok, Data};
+await_async_log_append(#raft_state{append_in_flight = {Ref, WorkerPid, MonitorRef, _Priority, _Pending, _NewLabel}} = Data) ->
+    receive
+        {async_log_append_complete, Ref, Result} ->
+            {ok, commit_taken_async_log_append(complete_async_log_append(Ref, Result, Data))};
+        {'DOWN', MonitorRef, process, WorkerPid, Reason} ->
+            {ok, complete_async_log_append_down(leader, MonitorRef, WorkerPid, Reason, Data)}
+    after ?ASYNC_APPEND_TAKE_TIMEOUT_MS ->
+        {{error, async_append_in_flight}, Data}
+    end.
+
+%% Commits what a taken append wrote under the configuration it was written
+%% under, as its arrival would have, without starting another append.
+-spec commit_taken_async_log_append(Data :: #raft_state{}) -> #raft_state{}.
+commit_taken_async_log_append(#raft_state{self = Self} = Data) ->
+    case is_single_member(Self, config(Data)) of
+        true -> update_quorum_ts(leader_apply_log(leader_advance_commit_index(Data)));
+        false -> Data
+    end.
+
 -spec cancel_async_append_in_flight(
     StateName :: state(),
     Reason :: wa_raft_acceptor:common_error(),
@@ -3689,13 +3726,18 @@ cancel_async_append_in_flight(
 cancel_async_append_in_flight(_StateName, _Reason, #raft_state{} = Data) ->
     Data.
 
+%% Waits on a fresh monitor: the append's own may be gone with its result, as
+%% when terminate runs after a crash in the completion handler and sees the
+%% state from before it, with a worker that has already exited.
 -spec await_async_append_worker_down(WorkerPid :: pid(), MonitorRef :: reference()) -> ok | {error, term()}.
 await_async_append_worker_down(WorkerPid, MonitorRef) ->
+    _ = erlang:demonitor(MonitorRef, [flush]),
+    Fresh = erlang:monitor(process, WorkerPid),
     receive
-        {'DOWN', MonitorRef, process, WorkerPid, _Reason} ->
+        {'DOWN', Fresh, process, WorkerPid, _Reason} ->
             ok
     after 5000 ->
-        _ = erlang:demonitor(MonitorRef, [flush]),
+        _ = erlang:demonitor(Fresh, [flush]),
         {error, async_append_worker_kill_timeout}
     end.
 

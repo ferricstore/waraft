@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.3 - 2026-10-24
+
+- With async log append on (`raft_async_log_append`), a membership change made
+  while a batch of commands was still being written could give its
+  configuration entry the same log index as that batch, and whichever finished
+  last overwrote the other. The leader now waits for the write in flight,
+  commits it under the current configuration, and only then appends the
+  change. If the write is still running after 5 seconds, the change fails with
+  `{error, async_append_in_flight}` and the configuration is unchanged.
+- A server that crashed rolling back a failed async append was restarted 5
+  seconds late: shutting down waited for the append's worker, which had already
+  exited, on a monitor that no longer existed. It now restarts at once.
+
 ## 0.1.2 - 2026-10-23
 
 - With pre-vote on (`raft_election_pre_vote`), the only member of a cluster
