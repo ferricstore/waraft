@@ -3689,13 +3689,18 @@ cancel_async_append_in_flight(
 cancel_async_append_in_flight(_StateName, _Reason, #raft_state{} = Data) ->
     Data.
 
+%% Waits on a fresh monitor: the append's own may be gone with its result, as
+%% when terminate runs after a crash in the completion handler and sees the
+%% state from before it, with a worker that has already exited.
 -spec await_async_append_worker_down(WorkerPid :: pid(), MonitorRef :: reference()) -> ok | {error, term()}.
 await_async_append_worker_down(WorkerPid, MonitorRef) ->
+    _ = erlang:demonitor(MonitorRef, [flush]),
+    Fresh = erlang:monitor(process, WorkerPid),
     receive
-        {'DOWN', MonitorRef, process, WorkerPid, _Reason} ->
+        {'DOWN', Fresh, process, WorkerPid, _Reason} ->
             ok
     after 5000 ->
-        _ = erlang:demonitor(MonitorRef, [flush]),
+        _ = erlang:demonitor(Fresh, [flush]),
         {error, async_append_worker_kill_timeout}
     end.
 
