@@ -294,7 +294,15 @@
 %%    at any time that the log always remains contiguous, meaning that
 %%    only the first entry in the log can be missing op information and
 %%    that the indices of all log entries in the log are contiguous.
--callback trim(Log :: log(), Index :: log_index(), State :: term()) -> {ok, NewState :: term()} | {error, Reason :: term()}.
+%%  - An implementation that trimmed only up to an earlier index, or that
+%%    deferred the work and trimmed nothing yet, returns that index with
+%%    {ok, TrimmedIndex, NewState}: the log view then starts there, and
+%%    rotation asks for the rest again with the next entries it applies.
+%%    Such an implementation should answer those repeated requests cheaply
+%%    while the work is still deferred. {ok, NewState} means the log was
+%%    trimmed up to Index.
+-callback trim(Log :: log(), Index :: log_index(), State :: term()) ->
+    {ok, NewState :: term()} | {ok, TrimmedIndex :: log_index(), NewState :: term()} | {error, Reason :: term()}.
 
 %% Flush log to disk on a best-effort basis. The return value is
 %% ignored.
@@ -754,16 +762,16 @@ truncate(#log_view{log = Log} = View, Index) ->
     gen_server:call(log_name(Log), {truncate, Index, View}, infinity).
 
 %% Trim the log by removing log entries before the provided log index.
-%% This operation is not required to remove all data before the
-%% provided log index immediately and can defer this work to future
-%% trimming operations. The public API is synchronous so providers that
-%% must rewrite durable segments can keep the in-memory view aligned with
-%% what is actually persisted.
+%% The provider may trim less, or defer the work to later trims; the view
+%% then starts where the provider's log does, so that rotation asks again.
+%% The public API is synchronous so providers that must rewrite durable
+%% segments can keep the in-memory view aligned with what is actually
+%% persisted.
 -spec trim(View :: view(), Index :: log_index()) -> {ok, NewView :: view()} | {error, term()}.
 trim(#log_view{log = Log, first = First} = View, Index) ->
     case gen_server:call(log_name(Log), {trim, Index}, infinity) of
-        ok ->
-            {ok, View#log_view{first = max(Index, First)}};
+        {ok, Trimmed} ->
+            {ok, View#log_view{first = max(Trimmed, First)}};
         {error, Reason} ->
             {error, Reason}
     end.
@@ -902,8 +910,8 @@ handle_call({truncate, Index, View}, _From, State) ->
     end;
 handle_call({trim, Index}, _From, #log_state{log = Log} = State) ->
     case handle_trim(Index, State) of
-        {ok, NewState} ->
-            {reply, ok, NewState};
+        {ok, Trimmed, NewState} ->
+            {reply, {ok, Trimmed}, NewState};
         {error, Reason} ->
             ?RAFT_LOG_WARNING("[~p] failed to trim log due to ~p", [log_name(Log), Reason]),
             {reply, {error, Reason}, State}
@@ -921,7 +929,7 @@ handle_cast(flush, #log_state{log = #raft_log{table = Table} = Log} = State) ->
     {noreply, State};
 handle_cast({trim, Index}, #log_state{log = Log} = State) ->
     case handle_trim(Index, State) of
-        {ok, NewState} ->
+        {ok, _Trimmed, NewState} ->
             {noreply, NewState};
         {error, Reason} ->
             ?RAFT_LOG_WARNING("[~p] failed to trim log due to ~p", [log_name(Log), Reason]),
@@ -1070,10 +1078,11 @@ handle_truncate(Index, #log_view{last = Last} = View0, #log_state{log = #raft_lo
     end.
 
 %% The public wa_raft_log:trim/2 call advances the view only after this provider
-%% operation succeeds. Returning an error here keeps the old view and lets the
-%% server retry rotation after the storage fault clears.
+%% operation succeeds, and only as far as the provider trimmed. Returning an
+%% error here keeps the old view and lets the server retry rotation after the
+%% storage fault clears.
 -spec handle_trim(Index :: log_index(), State :: #log_state{}) ->
-    {ok, NewState :: #log_state{}} | {error, Reason :: term()}.
+    {ok, Trimmed :: log_index(), NewState :: #log_state{}} | {error, Reason :: term()}.
 handle_trim(_Index, #log_state{state = ?PROVIDER_NOT_OPENED}) ->
     {error, not_open};
 handle_trim(Index, #log_state{log = #raft_log{table = Table} = Log, state = ProviderState} = State) ->
@@ -1082,7 +1091,11 @@ handle_trim(Index, #log_state{log = #raft_log{table = Table} = Log, state = Prov
     Provider = provider(Log),
     case Provider:trim(Log, Index, ProviderState) of
         {ok, NewProviderState} ->
-            {ok, State#log_state{state = NewProviderState}};
+            {ok, Index, State#log_state{state = NewProviderState}};
+        {ok, Trimmed, NewProviderState} when is_integer(Trimmed), Trimmed =< Index ->
+            ?RAFT_COUNT(Table, 'log.trim.short'),
+            ?RAFT_LOG_DEBUG("[~p] log trimmed only to ~p of ~p", [log_name(Log), Trimmed, Index]),
+            {ok, Trimmed, State#log_state{state = NewProviderState}};
         {error, Reason} ->
             ?RAFT_COUNT(Table, 'log.trim.error'),
             {error, Reason}

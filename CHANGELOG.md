@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.4 - 2026-10-26
+
+- A log provider may trim less than rotation asks for, or defer the work,
+  but the log view still started at the asked index. Rotation then waited a
+  whole interval (`raft_max_log_records_per_file` entries) past that index
+  before asking again, and the entries the provider kept stayed in the log
+  until then, or until a restart. A provider's `trim/3` can now return
+  `{ok, TrimmedIndex, NewState}`: the view starts at `TrimmedIndex` and
+  rotation asks for the rest with the next entries it applies. `{ok, NewState}`
+  still means the log was trimmed to the asked index.
+
 ## 0.1.3 - 2026-10-24
 
 - With async log append on (`raft_async_log_append`), a membership change made
