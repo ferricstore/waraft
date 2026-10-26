@@ -8,7 +8,8 @@
 %% An ETS log whose appends a test can hold. While a test owns the gate, each
 %% append sends it {gate_append, Appender, Entries} and waits for the test to
 %% answer with the append's result, `ok' to store the entries or any other term
-%% to return it. Everything else is wa_raft_log_ets.
+%% to return it. A test can also make trims stop short of an index, as a log
+%% that defers some of the work does. Everything else is wa_raft_log_ets.
 
 -behaviour(wa_raft_log).
 
@@ -36,6 +37,7 @@
 -export([
     set_owner/1,
     fail_truncate/1,
+    limit_trim/1,
     clear/0
 ]).
 
@@ -50,11 +52,20 @@ set_owner(Pid) ->
 fail_truncate(Reason) ->
     persistent_term:put({?MODULE, truncate}, Reason).
 
+%% Makes every trim past Limit trim only up to Limit and say so, as a log
+%% that defers work does; `undefined' trims as asked again.
+limit_trim(undefined) ->
+    _ = persistent_term:erase({?MODULE, trim_limit}),
+    ok;
+limit_trim(Limit) ->
+    persistent_term:put({?MODULE, trim_limit}, Limit).
+
 %% Releases appends still held, failing them, so that a failed test does not
 %% leave the server waiting on the gate.
 clear() ->
     _ = persistent_term:erase({?MODULE, owner}),
     _ = persistent_term:erase({?MODULE, truncate}),
+    _ = persistent_term:erase({?MODULE, trim_limit}),
     case ets:info(?MODULE) of
         undefined ->
             ok;
@@ -103,5 +114,12 @@ init(Log) -> wa_raft_log_ets:init(Log).
 open(Log) -> wa_raft_log_ets:open(Log).
 close(Log, State) -> wa_raft_log_ets:close(Log, State).
 reset(Log, Position, State) -> wa_raft_log_ets:reset(Log, Position, State).
-trim(Log, Index, State) -> wa_raft_log_ets:trim(Log, Index, State).
+trim(Log, Index, State) ->
+    case persistent_term:get({?MODULE, trim_limit}, undefined) of
+        Limit when is_integer(Limit), Limit < Index ->
+            {ok, NewState} = wa_raft_log_ets:trim(Log, Limit, State),
+            {ok, Limit, NewState};
+        _ ->
+            wa_raft_log_ets:trim(Log, Index, State)
+    end.
 flush(Log) -> wa_raft_log_ets:flush(Log).
